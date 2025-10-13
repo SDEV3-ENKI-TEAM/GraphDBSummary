@@ -16,6 +16,20 @@
 - Neo4j 그래프에서 엔티티 간 최단 경로 탐색 (1~2 hops)
 - 공격 연관성 및 간접 관계 확인
 
+[
+  {
+    "e1_name": "svchost.exe",
+    "e2_name": "malware.exe",
+    "hops": 2,
+    "path_nodes": [
+      "Process:svchost.exe",
+      "User:NT AUTHORITY\\SYSTEM",
+      "Process:malware.exe"
+    ]
+  }
+]
+svchost.exe → malware.exe가 직접 연결되어 있지 않아도, 사용자 계정 NT AUTHORITY\SYSTEM을 통해 간접적으로 연결됨을 확인 가능. 이를 통해 공격자가 정상 프로세스를 이용해 악성 파일을 실행했을 가능성을 탐지할 수 있음.
+
 ### 5. 대응 제안 생성
 - `generate_mitigation_prompt()` → LLM 프롬프트 구성
 - LLM 호출 → 단계별 대응 방안 생성 (탐지/격리, 네트워크 차단, 로그 모니터링, 예방 전략)
