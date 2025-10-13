@@ -1,3 +1,30 @@
+## 🧩 노드 구성
+
+| 노드(Label) | 주요 속성(Properties) | 설명 |
+|--------------|----------------------|------|
+| `:Trace` | `id` | 하나의 실행 흐름(트레이스)을 의미 |
+| `:Summary` | `text`, `embedding` | 트레이스 요약 내용 및 임베딩 벡터 |
+| `:Technique` | `id` | MITRE ATT&CK 기술 ID (`T1055` 등) |
+| `:Process` | `guid` | 실행된 프로세스 식별자 |
+| `:File` | `name` | 접근/로드된 파일 이름 |
+| `:IpAddress` | `address` | 외부 통신 대상 IP |
+| `:RegistryKey` | `path` | 접근 또는 수정된 레지스트리 키 경로 |
+
+---
+
+## 🔗 관계(Relationships)
+
+| 관계 타입 | 방향 | 의미 |
+|-------------|--------|------|
+| `[:HAS_SUMMARY]` | `(:Trace) → (:Summary)` | 트레이스의 요약을 연결 |
+| `[:MENTIONS]` | `(:Summary) → (:Technique)` | 요약에서 특정 공격 기술을 언급 |
+| `[:INDICATES_TECHNIQUE]` | `(:Trace) → (:Technique)` | 트레이스가 특정 MITRE 기법을 나타냄 |
+| `[:PARTICIPATED_IN]` | `(:Process)`, `(:File)`, `(:IpAddress)` → `(:Trace)` | 트레이스에 참여한 개체들 |
+| `[:MODIFIED_KEY]` | `(:Process) → (:RegistryKey)` | 프로세스가 레지스트리 키를 수정 |
+| *(또 다른)* `[:PARTICIPATED_IN]` | `(:File) → (:Trace)` | 파일이 해당 트레이스에서 사용됨 |
+
+---
+
 ## 흐름
 
 ### 1. 트레이스 입력
