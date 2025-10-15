@@ -25,7 +25,7 @@
 
 ---
 
-## 흐름
+## 분석 흐름
 
 ### 1. 트레이스 입력
 - JSON 형식 트레이스 파일 또는 Kafka 등 실시간 스트림에서 입력 가능
@@ -61,3 +61,8 @@ svchost.exe → malware.exe가 직접 연결되어 있지 않아도, 사용자 �
 ### 5. 대응 제안 생성
 - `generate_mitigation_prompt()` → LLM 프롬프트 구성
 - LLM 호출 → 단계별 대응 방안 생성 (탐지/격리, 네트워크 차단, 로그 모니터링, 예방 전략)
+
+## 실행 방법
+kafka 토픽: trace_analysis
+
+- producer.py 파일 실행 시 'trace_analysis' 토픽으로 실시간 스트리밍
