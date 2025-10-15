@@ -307,16 +307,6 @@ def analyze_structural_similarity_no_db(driver, new_trace, prompt_template, top_
             'mitigation_suggestions': mitigation_response.content
         }
 
-
-# if __name__ == "__main__":
-#     # 요약 프롬프트 읽기
-#     try:
-#         with open(PROMPT_FILE, 'r', encoding='utf-8') as f:
-#             prompt_template = f.read()
-#     except FileNotFoundError:
-#         print(f"오류: '{os.path.abspath(PROMPT_FILE)}' 파일을 찾을 수 없습니다.")
-#         exit()
-
-#     # 분석할 trace 경로 -> kafka 연동 필요
 #     trace_path = "C:\\Users\\KISIA\\Downloads\\data\\T1018.json"
+
 
