@@ -1,18 +1,11 @@
 import json
 import os
-from neo4j import GraphDatabase
 import numpy as np
 from llm import llm
 from collections import Counter
 from sentence_transformers import SentenceTransformer
 
-# --- Neo4j 연결 정보 ---
-URI = "bolt://localhost:7687"
-AUTH = ("neo4j", "PW")
 DATABASE = "neo4j"
-driver = GraphDatabase.driver(URI, auth=AUTH)
-
-PROMPT_FILE = "C:\\Users\\KISIA\\Desktop\\Enki\\Neo4j\\summary_prompt.md"
 
 embedding_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
 
@@ -126,7 +119,7 @@ def cosine_similarity(vec1, vec2):
 def find_similar_traces(driver, summary_text, top_k=5):
     with driver.session(database=DATABASE) as session:
         all_summaries = session.run("""
-            MATCH (t:Trace)-[:HAS_SUMMARY]->(s:Summary)
+            MATCH (s:Summary)-[:SUMMARIZES]->(t:Trace)
             RETURN 
                 coalesce(t.traceId, t.`traceId:ID(Trace)`) AS trace_id, 
                 s.embedding AS embedding
@@ -138,11 +131,23 @@ def find_similar_traces(driver, summary_text, top_k=5):
         for record in all_summaries:
             trace_id = record['trace_id']
             emb = record['embedding']
+
+            if isinstance(emb, str):
+                try:
+                    emb = json.loads(emb)
+                except json.JSONDecodeError:
+                    continue  
+
+            if emb is None:
+                continue
+
             sim = cosine_similarity(summary_embedding, emb)
             similarities.append({'trace_id': trace_id, 'similarity': sim})
 
         similarities.sort(key=lambda x: x['similarity'], reverse=True)
         return similarities[:top_k]
+
+
 
 
 def generate_mitigation_prompt(summary_result, structural_similarity, indirect_connections):
@@ -155,7 +160,6 @@ def generate_mitigation_prompt(summary_result, structural_similarity, indirect_c
     similar_techniques = set()
     for s in structural_similarity:
         similar_entities.update(s['common_entities'])
-        similar_techniques.update(s['common_techniques'])
 
     for c in indirect_connections:
         similar_entities.add(c['e1_name'])
@@ -170,9 +174,6 @@ def generate_mitigation_prompt(summary_result, structural_similarity, indirect_c
 
     [연관 엔티티]
     {', '.join(similar_entities)}
-
-    [연관 공격 기술 / TTP]
-    {', '.join(similar_techniques)}
 
     [요청]
     1. 탐지된 악성 프로세스 및 파일 격리 방법
@@ -203,77 +204,119 @@ def analyze_structural_similarity_no_db(driver, new_trace, prompt_template, top_
     # 구조적 유사성 분석
     with driver.session(database=DATABASE) as session:
         res = session.run("""
-            MATCH (t:Trace)-[:HAS_SUMMARY]->(s:Summary)
+            MATCH (s:Summary)-[:SUMMARIZES]->(t:Trace)
             WHERE t.traceId IN $trace_ids
-            OPTIONAL MATCH (s)-[:MENTIONS]->(e)
-            OPTIONAL MATCH (s)-[:INDICATES_TECHNIQUE]->(tech)
-            RETURN t.traceId AS trace_id, 
-                   collect(DISTINCT coalesce(e.name, e.filePath, e.address, e.keyPath)) AS entities,
-                   collect(DISTINCT tech.name) AS techniques
+            OPTIONAL MATCH (s)-[:USES_TECHNIQUE]->(tech)
+            OPTIONAL MATCH (t)<-[:PARTICIPATED_IN]-(ent)
+            RETURN 
+                t.traceId AS trace_id,
+                collect(DISTINCT
+                    CASE labels(ent)[0]
+                        WHEN 'Process' THEN ent.processName
+                        WHEN 'File' THEN ent.filePath
+                        WHEN 'User' THEN ent.userName
+                        WHEN 'Ip' THEN ent.ipAddress
+                        WHEN 'Registry' THEN ent.keyPath
+                        ELSE null
+                    END
+                ) AS entities,
+                collect(DISTINCT tech.name) AS techniques
+
         """, trace_ids=similar_ids)
 
-        trace_json = new_trace if isinstance(new_trace, dict) else json.load(open(new_trace, 'r', encoding='utf-8-sig'))
-        new_entities = set([e['value'] for e in trace_json.get('key_entities', [])])
-        new_techniques = set([t['name'] for t in trace_json.get('attack_techniques', [])])
+        trace_entities = summary_result.get("key_entities", [])
+        new_entities = set(
+            e['value'].strip().lower().replace('\\','/')  
+            for e in trace_entities
+            if isinstance(e, dict) and 'value' in e
+        )
 
         comparisons = []
         for record in res:
-            db_entities = set(record['entities'])
-            db_techniques = set(record['techniques'])
+
+            db_entities = set(
+                (e or '').strip().lower().replace('\\','/') 
+                for e in record['entities'] 
+                if e and e != '-'
+            )
+            # 공통 엔티티
             common_entities = new_entities & db_entities
-            common_techniques = new_techniques & db_techniques
+
             comparisons.append({
                 'trace_id': record['trace_id'],
                 'common_entities': list(common_entities),
-                'common_techniques': list(common_techniques),
                 'entity_match_count': len(common_entities),
-                'technique_match_count': len(common_techniques)
             })
 
-        comparisons.sort(key=lambda x: (x['entity_match_count'], x['technique_match_count']), reverse=True)
+        comparisons.sort(key=lambda x: (x['entity_match_count']), reverse=True)
 
-    # 간접 연결 탐색
-    with driver.session(database=DATABASE) as session:
-        query = """
-            UNWIND $trace_ids AS trace_id
-            MATCH (t:Trace {traceId: trace_id})-[:HAS_SUMMARY]->(:Summary)-[:MENTIONS]->(e)
-            WITH collect(DISTINCT e) AS groupEntities
-            UNWIND groupEntities AS e1
-            UNWIND groupEntities AS e2
-            WITH e1, e2 WHERE id(e1) < id(e2)
-            MATCH path = shortestPath((e1)-[*..2]-(e2))
-            RETURN e1.name AS e1_name, e2.name AS e2_name,
-                   length(path) AS hops,
-                   [n IN nodes(path) | labels(n)[0] + ':' + coalesce(n.name, n.filePath, n.address, '')] AS path_nodes
-            LIMIT 50
-        """
-        indirect_connections = session.run(query, trace_ids=similar_ids)
-        indirect_connections = [r.data() for r in indirect_connections]
+        # 간접 연결 탐색
+        with driver.session(database=DATABASE) as session:
+            query = """
+                UNWIND $trace_ids AS trace_id
+                MATCH (s:Summary)-[:SUMMARIZES]->(t:Trace {traceId: trace_id})
+                OPTIONAL MATCH (t)<-[:PARTICIPATED_IN]-(ent)
+                WITH collect(DISTINCT
+                    CASE labels(ent)[0]
+                        WHEN 'Process' THEN ent.processName
+                        WHEN 'File' THEN ent.filePath
+                        WHEN 'User' THEN ent.userName
+                        WHEN 'Ip' THEN ent.ipAddress
+                        WHEN 'Registry' THEN ent.keyPath
+                        ELSE null
+                    END
+                ) AS groupEntities
+                UNWIND groupEntities AS e1
+                UNWIND groupEntities AS e2
+                WITH e1, e2 WHERE e1 IS NOT NULL AND e2 IS NOT NULL AND e1 < e2
+                MATCH path = shortestPath(
+                    (n1)-[*..2]-(n2)
+                )
+                WHERE 
+                    ( (labels(n1)[0] = 'Process' AND n1.processName = e1) OR
+                    (labels(n1)[0] = 'File' AND n1.filePath = e1) OR
+                    (labels(n1)[0] = 'User' AND n1.userName = e1) OR
+                    (labels(n1)[0] = 'Ip' AND n1.ipAddress = e1) OR
+                    (labels(n1)[0] = 'Registry' AND n1.keyPath = e1) )
+                AND
+                    ( (labels(n2)[0] = 'Process' AND n2.processName = e2) OR
+                    (labels(n2)[0] = 'File' AND n2.filePath = e2) OR
+                    (labels(n2)[0] = 'User' AND n2.userName = e2) OR
+                    (labels(n2)[0] = 'Ip' AND n2.ipAddress = e2) OR
+                    (labels(n2)[0] = 'Registry' AND n2.keyPath = e2) )
+                RETURN e1 AS e1_name, e2 AS e2_name,
+                    length(path) AS hops,
+                    [n IN nodes(path) | 
+                        labels(n)[0] + ':' + coalesce(n.name, n.processName, n.filePath, n.userName, n.ipAddress, n.keyPath, '') 
+                    ] AS path_nodes
+                LIMIT 50
 
-    # 대응 제안 생성
-    mitigation_prompt = generate_mitigation_prompt(summary_result, comparisons, indirect_connections)
-    mitigation_response = llm.invoke(mitigation_prompt)
+            """
+            indirect_connections = session.run(query, trace_ids=similar_ids)
+            indirect_connections = [r.data() for r in indirect_connections]
 
-    return {
-        'summary': summary_result,
-        'semantic_top_traces': top_similar_traces,
-        'structural_similarity': comparisons,
-        'indirect_connections': indirect_connections,
-        'mitigation_suggestions': mitigation_response.content
-    }
+        #     # 대응 제안 생성
+        mitigation_prompt = generate_mitigation_prompt(summary_result, comparisons, indirect_connections)
+        mitigation_response = llm.invoke(mitigation_prompt)
+
+        return {
+            'summary': summary_result,
+            'semantic_top_traces': top_similar_traces,
+            'structural_similarity': comparisons,
+            'indirect_connections': indirect_connections,
+            'mitigation_suggestions': mitigation_response.content
+        }
 
 
-if __name__ == "__main__":
-    # 요약 프롬프트 읽기
-    try:
-        with open(PROMPT_FILE, 'r', encoding='utf-8') as f:
-            prompt_template = f.read()
-    except FileNotFoundError:
-        print(f"오류: '{os.path.abspath(PROMPT_FILE)}' 파일을 찾을 수 없습니다.")
-        exit()
+# if __name__ == "__main__":
+#     # 요약 프롬프트 읽기
+#     try:
+#         with open(PROMPT_FILE, 'r', encoding='utf-8') as f:
+#             prompt_template = f.read()
+#     except FileNotFoundError:
+#         print(f"오류: '{os.path.abspath(PROMPT_FILE)}' 파일을 찾을 수 없습니다.")
+#         exit()
 
-    # 분석할 trace 경로 -> kafka 연동 필요
-    trace_path = "C:\\Users\\KISIA\\Downloads\\data\\~trace-0c19072a66a94fe548636d7b50a06bef.json"
+#     # 분석할 trace 경로 -> kafka 연동 필요
+#     trace_path = "C:\\Users\\KISIA\\Downloads\\data\\T1018.json"
 
-    results = analyze_structural_similarity_no_db(driver, trace_path, prompt_template, top_k=5)
-    print(json.dumps(results, ensure_ascii=False, indent=2))
